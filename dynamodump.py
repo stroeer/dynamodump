@@ -181,28 +181,6 @@ def wait_for_active_table(conn, table_name, verb):
             break
 
 
-def update_provisioned_throughput(conn, table_name, read_capacity, write_capacity, wait=True):
-    logging.info(
-        "Updating " + table_name + " table read capacity to: " + str(read_capacity) + ", write capacity to: " + str(
-            write_capacity))
-    while True:
-        try:
-            conn.update_table(table_name,
-                              {"ReadCapacityUnits": int(read_capacity), "WriteCapacityUnits": int(write_capacity)})
-            break
-        except boto.exception.JSONResponseError as e:
-            if e.body["__type"] == "com.amazonaws.dynamodb.v20120810#LimitExceededException":
-                logging.info("Limit exceeded, retrying updating throughput of " + table_name + "..")
-                time.sleep(sleep_interval)
-            elif e.body["__type"] == "com.amazon.coral.availability#ThrottlingException":
-                logging.info("Control plane limit exceeded, retrying updating throughput of " + table_name + "..")
-                time.sleep(sleep_interval)
-
-    # wait for provisioned throughput update completion
-    if wait:
-        wait_for_active_table(conn, table_name, "updated")
-
-
 def do_empty(conn, table_name):
     logging.info("Starting Empty for " + table_name + "..")
 
@@ -269,10 +247,6 @@ def do_backup(conn, table_name, read_capacity):
         original_read_capacity = table_desc["Table"]["ProvisionedThroughput"]["ReadCapacityUnits"]
         original_write_capacity = table_desc["Table"]["ProvisionedThroughput"]["WriteCapacityUnits"]
 
-        # override table read capacity if specified
-        if read_capacity is not None and read_capacity != original_read_capacity:
-            update_provisioned_throughput(conn, table_name, read_capacity, original_write_capacity)
-
         # get table data
         logging.info("Dumping table items for " + table_name)
         mkdir_p(args.dumpPath + "/" + table_name + "/" + DATA_DIR)
@@ -293,10 +267,6 @@ def do_backup(conn, table_name, read_capacity):
                 last_evaluated_key = scanned_table["LastEvaluatedKey"]
             except KeyError:
                 break
-
-        # revert back to original table read capacity if specified
-        if read_capacity is not None and read_capacity != original_read_capacity:
-            update_provisioned_throughput(conn, table_name, original_read_capacity, original_write_capacity, False)
 
         logging.info("Backup for " + table_name + " table completed. Time taken: " + str(
             datetime.datetime.now().replace(microsecond=0) - start_time))
@@ -369,11 +339,6 @@ def do_restore(conn, sleep_interval, source_table, destination_table, write_capa
 
         # wait for table creation completion
         wait_for_active_table(conn, destination_table, "created")
-    else:
-        # update provisioned capacity
-        if int(write_capacity) > original_write_capacity:
-            update_provisioned_throughput(conn, destination_table, original_read_capacity, write_capacity,
-                                          False)
 
     if not args.schemaOnly:
         # read data files
@@ -403,10 +368,6 @@ def do_restore(conn, sleep_interval, source_table, destination_table, write_capa
                 batch_write(conn, BATCH_WRITE_SLEEP_INTERVAL, destination_table, put_requests)
 
         if not args.skipThroughputUpdate:
-            # revert to original table write capacity if it has been modified
-            if int(write_capacity) != original_write_capacity:
-                update_provisioned_throughput(conn, destination_table, original_read_capacity, original_write_capacity,
-                                              False)
 
             # loop through each GSI to check if it has changed and update if necessary
             if table_global_secondary_indexes is not None:
